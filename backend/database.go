@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type ScriptRecord struct {
@@ -34,7 +34,7 @@ var db *sql.DB
 
 func initDatabase() error {
 	var err error
-	db, err = sql.Open("sqlite3", "./scripts.db")
+	db, err = sql.Open("sqlite", "./scripts.db")
 	if err != nil {
 		return fmt.Errorf("failed to open database: %v", err)
 	}
@@ -307,12 +307,12 @@ func CleanupOldLogs(days int) error {
 	}
 
 	cutoffDate := time.Now().AddDate(0, 0, -days)
-	
+
 	_, err := db.Exec(`
 		DELETE FROM execution_logs 
 		WHERE executed_at < ?
 	`, cutoffDate)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to cleanup old logs: %v", err)
 	}
