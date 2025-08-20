@@ -59,7 +59,6 @@ type SystemStatus struct {
 	Timestamp string `json:"timestamp"`
 }
 
-
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -161,12 +160,11 @@ func main() {
 	// WebSocket endpoint for real-time monitoring
 	r.HandleFunc("/ws", handleWebSocket)
 
-	
 	// Start system monitoring goroutine
 	go startSystemMonitoring()
 
 	// 构建地址字符串
-	addr := fmt.Sprintf(":%d", *port)
+	addr := fmt.Sprintf("0.0.0.0:%d", *port)
 	fmt.Printf("Server starting on port %d...\n", *port)
 	log.Fatal(http.ListenAndServe(addr, r))
 }
@@ -1231,7 +1229,6 @@ func broadcastSystemStatus() {
 	}
 }
 
-
 func startSystemMonitoring() {
 	ticker := time.NewTicker(2 * time.Second) // Update every 2 seconds
 	defer ticker.Stop()
@@ -1240,4 +1237,3 @@ func startSystemMonitoring() {
 		broadcastSystemStatus()
 	}
 }
-
