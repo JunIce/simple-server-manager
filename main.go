@@ -1,10 +1,12 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -59,6 +61,10 @@ type SystemStatus struct {
 	Timestamp string `json:"timestamp"`
 }
 
+//go:embed frontend/static
+//go:embed frontend/templates
+var embeddedFS embed.FS
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -108,8 +114,12 @@ func main() {
 
 	r := mux.NewRouter()
 
-	// 静态文件服务
-	r.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("../frontend/static/"))))
+	// 静态文件服务 - 使用嵌入的文件系统
+	staticFS, err := fs.Sub(embeddedFS, "frontend/static")
+	if err != nil {
+		log.Fatalf("Failed to create static filesystem: %v", err)
+	}
+	r.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 
 	// 主页
 	r.HandleFunc("/", serveHome).Methods("GET")
@@ -170,7 +180,14 @@ func main() {
 }
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, "../frontend/templates/index.html")
+	// 从嵌入的文件系统读取模板
+	templateData, err := embeddedFS.ReadFile("frontend/templates/index.html")
+	if err != nil {
+		http.Error(w, "Template not found", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html")
+	w.Write(templateData)
 }
 
 func getDirectoryList(w http.ResponseWriter, r *http.Request) {
