@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -96,6 +97,10 @@ type ImageInfo struct {
 }
 
 func main() {
+	// 解析命令行参数
+	port := flag.Int("port", 8080, "Port to run the server on")
+	flag.Parse()
+
 	// 初始化数据库
 	if err := initDatabase(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
@@ -160,8 +165,10 @@ func main() {
 	// Start system monitoring goroutine
 	go startSystemMonitoring()
 
-	fmt.Println("Server starting on port 8080...")
-	log.Fatal(http.ListenAndServe(":8080", r))
+	// 构建地址字符串
+	addr := fmt.Sprintf(":%d", *port)
+	fmt.Printf("Server starting on port %d...\n", *port)
+	log.Fatal(http.ListenAndServe(addr, r))
 }
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
