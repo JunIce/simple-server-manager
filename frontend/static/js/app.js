@@ -2,7 +2,7 @@
 let currentPath = '.';
 let selectedFiles = [];
 let selectedScripts = [];
-let currentSection = 'directory';
+let currentSection = 'monitoring';
 let currentLanguage = 'zh-CN';
 
 // 多语言支持
@@ -29,7 +29,21 @@ const translations = {
         'container_management': '容器管理',
         'image_management': '镜像管理',
         'port_usage': '端口占用',
+        'monitoring': '系统监控',
         'service_management': '服务管理',
+        'system_monitoring': '系统监控',
+        'start_monitoring': '开始监控',
+        'stop_monitoring': '停止监控',
+        'monitoring_status': '监控状态',
+        'cpu_usage': 'CPU 使用率',
+        'memory_usage': '内存使用',
+        'disk_usage': '磁盘使用',
+        'system_uptime': '系统运行时间',
+        'last_update': '最后更新时间',
+        'connected': '已连接',
+        'disconnected': '未连接',
+        'connecting': '连接中...',
+        'connection_error': '连接错误',
         
         // 目录管理
         'parent_directory': '上级目录',
@@ -189,6 +203,20 @@ const translations = {
         'image_management': 'Image Management',
         'port_usage': 'Port Usage',
         'service_management': 'Service Management',
+        'monitoring': 'System Monitoring',
+        'system_monitoring': 'System Monitoring',
+        'start_monitoring': 'Start Monitoring',
+        'stop_monitoring': 'Stop Monitoring',
+        'monitoring_status': 'Monitoring Status',
+        'cpu_usage': 'CPU Usage',
+        'memory_usage': 'Memory Usage',
+        'disk_usage': 'Disk Usage',
+        'system_uptime': 'System Uptime',
+        'last_update': 'Last Update',
+        'connected': 'Connected',
+        'disconnected': 'Disconnected',
+        'connecting': 'Connecting...',
+        'connection_error': 'Connection Error',
         
         // 目录管理
         'parent_directory': 'Parent Directory',
@@ -359,12 +387,13 @@ function updateUILanguage() {
     
     // 更新导航按钮
     const navButtons = document.querySelectorAll('.nav-btn');
-    navButtons[0].textContent = t('directory_management');
-    navButtons[1].textContent = t('docker_scripts');
-    navButtons[2].textContent = t('container_management');
-    navButtons[3].textContent = t('image_management');
-    navButtons[4].textContent = t('port_usage');
-    navButtons[5].textContent = t('service_management');
+    navButtons[0].textContent = t('monitoring');
+    navButtons[1].textContent = t('directory_management');
+    navButtons[2].textContent = t('docker_scripts');
+    navButtons[3].textContent = t('container_management');
+    navButtons[4].textContent = t('image_management');
+    navButtons[5].textContent = t('port_usage');
+    navButtons[6].textContent = t('service_management');
     
     // 更新当前区域的语言
     if (currentSection) {
@@ -392,6 +421,9 @@ function updateSectionLanguage(section) {
             break;
         case 'services':
             updateServicesLanguage();
+            break;
+        case 'monitoring':
+            updateMonitoringLanguage();
             break;
     }
 }
@@ -516,6 +548,33 @@ function updateServicesLanguage() {
     headers[5].textContent = t('container_actions');
 }
 
+// 更新系统监控区域语言
+function updateMonitoringLanguage() {
+    const section = document.querySelector('#monitoring-section');
+    if (!section) return;
+    
+    section.querySelector('h2').textContent = t('system_monitoring');
+    const toggleBtn = document.getElementById('monitoring-toggle-btn');
+    if (toggleBtn) {
+        toggleBtn.textContent = isMonitoring ? t('stop_monitoring') : t('start_monitoring');
+    }
+    
+    // 更新监控卡片标题
+    const cards = section.querySelectorAll('.monitoring-card h3');
+    if (cards.length >= 3) {
+        cards[0].textContent = t('cpu_usage');
+        cards[1].textContent = t('memory_usage');
+        cards[2].textContent = t('disk_usage');
+    }
+    
+    // 更新信息卡片标题
+    const infoCards = section.querySelectorAll('.info-card h3');
+    if (infoCards.length >= 2) {
+        infoCards[0].textContent = t('system_uptime');
+        infoCards[1].textContent = t('last_update');
+    }
+}
+
 // 初始化
 document.addEventListener('DOMContentLoaded', function() {
     // 加载保存的语言设置
@@ -529,6 +588,9 @@ document.addEventListener('DOMContentLoaded', function() {
     loadDirectory();
     setupEventListeners();
     updateUILanguage();
+    
+    // 初始化图表，但不立即开始绘制
+    initCharts();
 });
 
 // 更新时间
@@ -587,6 +649,9 @@ function showSection(section) {
             break;
         case 'images':
             loadImages();
+            break;
+        case 'monitoring':
+            // 监控页面不需要加载数据，用户需要手动点击开始监控
             break;
     }
 }
@@ -1765,3 +1830,333 @@ document.getElementById('dialog').addEventListener('click', function(e) {
         closeDialog();
     }
 });
+
+// 系统监控相关变量
+let monitoringWebSocket = null;
+let isMonitoring = false;
+
+// 图表相关变量
+let cpuChart = null;
+let memoryChart = null;
+let chartUpdateInterval = null;
+
+// 前端历史数据存储
+let cpuHistoryData = [];
+let memoryHistoryData = [];
+let maxDataPoints = 900; // 30分钟的数据 (30*60/2=900个点)
+
+// 格式化文件大小
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// 切换监控状态
+function toggleMonitoring() {
+    const btn = document.getElementById('monitoring-toggle-btn');
+    const status = document.getElementById('monitoring-status');
+    
+    if (isMonitoring) {
+        stopMonitoring();
+        btn.textContent = t('start_monitoring');
+        btn.classList.remove('active');
+        status.textContent = t('disconnected');
+        status.className = 'status-disconnected';
+    } else {
+        startMonitoring();
+        btn.textContent = t('stop_monitoring');
+        btn.classList.add('active');
+        status.textContent = t('connecting');
+        status.className = 'status-connected';
+    }
+}
+
+// 开始监控
+function startMonitoring() {
+    if (monitoringWebSocket) {
+        monitoringWebSocket.close();
+    }
+    
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    
+    monitoringWebSocket = new WebSocket(wsUrl);
+    
+    monitoringWebSocket.onopen = function() {
+        isMonitoring = true;
+        const status = document.getElementById('monitoring-status');
+        status.textContent = t('connected');
+        status.className = 'status-connected';
+        console.log('WebSocket 连接已建立');
+        
+        // 清空历史数据并开始图表更新
+        cpuHistoryData = [];
+        memoryHistoryData = [];
+        startChartUpdates();
+    };
+    
+    monitoringWebSocket.onmessage = function(event) {
+        const data = JSON.parse(event.data);
+        updateMonitoringDisplay(data);
+    };
+    
+    monitoringWebSocket.onclose = function() {
+        isMonitoring = false;
+        const status = document.getElementById('monitoring-status');
+        status.textContent = t('disconnected');
+        status.className = 'status-disconnected';
+        console.log('WebSocket 连接已断开');
+        
+        // 停止图表更新
+        stopChartUpdates();
+    };
+    
+    monitoringWebSocket.onerror = function(error) {
+        console.error('WebSocket 错误:', error);
+        const status = document.getElementById('monitoring-status');
+        status.textContent = t('connection_error');
+        status.className = 'status-disconnected';
+        
+        // 停止图表更新
+        stopChartUpdates();
+    };
+}
+
+// 停止监控
+function stopMonitoring() {
+    if (monitoringWebSocket) {
+        monitoringWebSocket.close();
+        monitoringWebSocket = null;
+    }
+    isMonitoring = false;
+    
+    // 停止图表更新
+    stopChartUpdates();
+}
+
+// 更新监控显示
+function updateMonitoringDisplay(data) {
+    // 更新CPU使用率
+    const cpuUsage = data.cpu_usage.toFixed(1);
+    document.getElementById('cpu-usage').textContent = cpuUsage + '%';
+    const cpuProgress = document.getElementById('cpu-progress');
+    cpuProgress.style.width = cpuUsage + '%';
+    
+    // 根据使用率设置进度条颜色
+    if (cpuUsage > 80) {
+        cpuProgress.className = 'progress-fill danger';
+    } else if (cpuUsage > 60) {
+        cpuProgress.className = 'progress-fill warning';
+    } else {
+        cpuProgress.className = 'progress-fill';
+    }
+    
+    // 更新内存使用
+    const memoryUsed = formatFileSize(data.memory_usage.used);
+    const memoryTotal = formatFileSize(data.memory_usage.total);
+    const memoryPercent = data.memory_usage.percent.toFixed(1);
+    document.getElementById('memory-usage').textContent = `${memoryUsed} / ${memoryTotal}`;
+    document.getElementById('memory-percent').textContent = memoryPercent + '%';
+    const memoryProgress = document.getElementById('memory-progress');
+    memoryProgress.style.width = memoryPercent + '%';
+    
+    if (memoryPercent > 80) {
+        memoryProgress.className = 'progress-fill danger';
+    } else if (memoryPercent > 60) {
+        memoryProgress.className = 'progress-fill warning';
+    } else {
+        memoryProgress.className = 'progress-fill';
+    }
+    
+    // 更新磁盘使用
+    const diskUsed = formatFileSize(data.disk_usage.used);
+    const diskTotal = formatFileSize(data.disk_usage.total);
+    const diskPercent = data.disk_usage.percent.toFixed(1);
+    document.getElementById('disk-usage').textContent = `${diskUsed} / ${diskTotal}`;
+    document.getElementById('disk-percent').textContent = diskPercent + '%';
+    const diskProgress = document.getElementById('disk-progress');
+    diskProgress.style.width = diskPercent + '%';
+    
+    if (diskPercent > 80) {
+        diskProgress.className = 'progress-fill danger';
+    } else if (diskPercent > 60) {
+        diskProgress.className = 'progress-fill warning';
+    } else {
+        diskProgress.className = 'progress-fill';
+    }
+    
+    // 更新系统运行时间
+    document.getElementById('system-uptime').textContent = data.uptime;
+    
+    // 更新最后更新时间
+    const updateTime = new Date(data.timestamp).toLocaleString();
+    document.getElementById('last-update').textContent = updateTime;
+    
+    // 存储历史数据并更新图表
+    storeHistoricalData(data);
+    updateChartsFromLocalData();
+}
+
+// 存储历史数据
+function storeHistoricalData(data) {
+    const now = new Date();
+    
+    // 添加CPU数据 - 确保时间戳格式兼容G2
+    cpuHistoryData.push({
+        timestamp: now,
+        value: parseFloat(data.cpu_usage.toFixed(1))
+    });
+    
+    // 添加内存数据 - 确保时间戳格式兼容G2
+    memoryHistoryData.push({
+        timestamp: now,
+        value: parseFloat(data.memory_usage.percent.toFixed(1))
+    });
+    
+    // 保持数据点数量在限制范围内
+    if (cpuHistoryData.length > maxDataPoints) {
+        cpuHistoryData = cpuHistoryData.slice(-maxDataPoints);
+    }
+    if (memoryHistoryData.length > maxDataPoints) {
+        memoryHistoryData = memoryHistoryData.slice(-maxDataPoints);
+    }
+}
+
+// 从本地数据更新图表
+function updateChartsFromLocalData() {
+    const timeRange = document.getElementById('time-range').value;
+    const filteredCpuData = filterDataByTimeRange(cpuHistoryData, timeRange);
+    const filteredMemoryData = filterDataByTimeRange(memoryHistoryData, timeRange);
+    
+    if (cpuChart && filteredCpuData.length > 0) {
+        cpuChart.changeData(filteredCpuData);
+    }
+    if (memoryChart && filteredMemoryData.length > 0) {
+        memoryChart.changeData(filteredMemoryData);
+    }
+}
+
+// 根据时间范围过滤数据
+function filterDataByTimeRange(data, timeRange) {
+    if (!data || data.length === 0) return [];
+    
+    const now = new Date();
+    let cutoffTime;
+    
+    switch (timeRange) {
+        case '1min':
+            cutoffTime = new Date(now.getTime() - 1 * 60 * 1000);
+            break;
+        case '5min':
+            cutoffTime = new Date(now.getTime() - 5 * 60 * 1000);
+            break;
+        case '30min':
+            cutoffTime = new Date(now.getTime() - 30 * 60 * 1000);
+            break;
+        default:
+            cutoffTime = new Date(now.getTime() - 5 * 60 * 1000);
+    }
+    
+    // 确保时间戳格式正确
+    return data.filter(item => {
+        const itemTime = new Date(item.timestamp);
+        return itemTime >= cutoffTime && !isNaN(itemTime.getTime());
+    });
+}
+
+// 页面卸载时关闭WebSocket连接
+window.addEventListener('beforeunload', function() {
+    stopMonitoring();
+    stopChartUpdates();
+});
+
+// 图表相关函数
+function initCharts() {
+  /* ---------- CPU 图表 ---------- */
+  cpuChart = new G2.Chart({
+    container: 'cpu-chart',
+    autoFit: true,
+    height: 300,
+  });
+
+  cpuChart.data([]);
+
+  cpuChart
+    .scale('timestamp', { type: 'time', tickCount: 8 })
+    .axis('timestamp', { title: '时间', labelFormatter: (d) => d.toTimeString().slice(0, 8) })
+    .scale('value', { domainMin: 0, domainMax: 100, nice: true })
+    .axis('value', { title: 'CPU使用率 (%)' });
+
+  cpuChart
+    .line()
+    .encode('x', 'timestamp')
+    .encode('y', 'value')
+    .animate(false);
+
+  cpuChart
+    .point()
+    .encode('x', 'timestamp')
+    .encode('y', 'value')
+    .encode('shape', 'circle')
+    .encode('size', 3);
+
+  cpuChart.render();
+
+  /* ---------- 内存 图表 ---------- */
+  memoryChart = new G2.Chart({
+    container: 'memory-chart',
+    autoFit: true,
+    height: 300,
+  });
+
+  memoryChart.data([]);
+
+  memoryChart
+    .scale('timestamp', { type: 'time', tickCount: 8 })
+    .axis('timestamp', { title: '时间', labelFormatter: (d) => d.toTimeString().slice(0, 8) })
+    .scale('value', { domainMin: 0, domainMax: 100, nice: true })
+    .axis('value', { title: '内存使用率 (%)' });
+
+  memoryChart
+    .line()
+    .encode('x', 'timestamp')
+    .encode('y', 'value')
+    .animate(false);
+
+  memoryChart
+    .point()
+    .encode('x', 'timestamp')
+    .encode('y', 'value')
+    .encode('shape', 'circle')
+    .encode('size', 3);
+
+  memoryChart.render();
+}
+
+function updateCharts() {
+    updateChartsFromLocalData();
+}
+
+function refreshCharts() {
+    updateCharts();
+    showNotification('图表已刷新', 'success');
+}
+
+function startChartUpdates() {
+    // 每5秒更新一次图表
+    chartUpdateInterval = setInterval(() => {
+        updateChartsFromLocalData();
+    }, 5000);
+}
+
+function stopChartUpdates() {
+    if (chartUpdateInterval) {
+        clearInterval(chartUpdateInterval);
+        chartUpdateInterval = null;
+    }
+}
+
+// 在页面加载时初始化图表（在原有的DOMContentLoaded中已添加）

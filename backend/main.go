@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 	_ "modernc.org/sqlite"
 )
 
@@ -38,6 +41,32 @@ type ServiceStatus struct {
 	Memory string `json:"memory"`
 	CPU    string `json:"cpu"`
 }
+
+type SystemStatus struct {
+	CPUUsage    float64 `json:"cpu_usage"`
+	MemoryUsage struct {
+		Used    uint64  `json:"used"`
+		Total   uint64  `json:"total"`
+		Percent float64 `json:"percent"`
+	} `json:"memory_usage"`
+	DiskUsage struct {
+		Used    uint64  `json:"used"`
+		Total   uint64  `json:"total"`
+		Percent float64 `json:"percent"`
+	} `json:"disk_usage"`
+	Uptime    string `json:"uptime"`
+	Timestamp string `json:"timestamp"`
+}
+
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+var clients = make(map[*websocket.Conn]bool)
+var clientsMutex sync.Mutex
 
 type DockerScript struct {
 	ID        int64     `json:"id"`
@@ -123,6 +152,13 @@ func main() {
 	r.HandleFunc("/api/images/remove", removeImage).Methods("POST")
 	r.HandleFunc("/api/images/pull", pullImage).Methods("POST")
 	r.HandleFunc("/api/images/prune", pruneImages).Methods("POST")
+
+	// WebSocket endpoint for real-time monitoring
+	r.HandleFunc("/ws", handleWebSocket)
+
+	
+	// Start system monitoring goroutine
+	go startSystemMonitoring()
 
 	fmt.Println("Server starting on port 8080...")
 	log.Fatal(http.ListenAndServe(":8080", r))
@@ -408,10 +444,10 @@ func executeDockerScript(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{
-		"output":     string(output),
-		"status":     status,
-		"duration":   duration,
-		"script_id":  scriptID,
+		"output":      string(output),
+		"status":      status,
+		"duration":    duration,
+		"script_id":   scriptID,
 		"script_name": scriptName,
 		"executed_at": time.Now(),
 	}
@@ -634,12 +670,12 @@ func getContainers(w http.ResponseWriter, r *http.Request) {
 
 	var containers []ContainerInfo
 	lines := strings.Split(string(output), "\n")
-	
+
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		
+
 		fields := strings.Split(line, "\t")
 		if len(fields) >= 6 {
 			containers = append(containers, ContainerInfo{
@@ -767,12 +803,12 @@ func getImages(w http.ResponseWriter, r *http.Request) {
 
 	var images []ImageInfo
 	lines := strings.Split(string(output), "\n")
-	
+
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		
+
 		fields := strings.Split(line, "\t")
 		if len(fields) >= 5 {
 			images = append(images, ImageInfo{
@@ -826,7 +862,7 @@ func pullImage(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]string{
 		"output": string(output),
-		"status":  "success",
+		"status": "success",
 	}
 
 	json.NewEncoder(w).Encode(response)
@@ -842,7 +878,7 @@ func pruneImages(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]string{
 		"output": string(output),
-		"status":  "success",
+		"status": "success",
 	}
 
 	json.NewEncoder(w).Encode(response)
@@ -947,9 +983,9 @@ func backupDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]string{
-		"message":    "Database backup completed successfully",
+		"message":     "Database backup completed successfully",
 		"backup_path": backupPath,
-		"timestamp":  timestamp,
+		"timestamp":   timestamp,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -978,10 +1014,223 @@ func restoreDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]string{
-		"message":    "Database restore completed successfully",
+		"message":     "Database restore completed successfully",
 		"backup_path": req.BackupPath,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
+
+// WebSocket handler
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WebSocket upgrade failed: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	clientsMutex.Lock()
+	clients[conn] = true
+	clientsMutex.Unlock()
+
+	log.Printf("WebSocket client connected from %s", r.RemoteAddr)
+
+	// Keep connection alive and handle disconnects
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			clientsMutex.Lock()
+			delete(clients, conn)
+			clientsMutex.Unlock()
+			log.Printf("WebSocket client disconnected: %v", err)
+			break
+		}
+	}
+}
+
+// System monitoring functions
+func getCPUUsage() float64 {
+	// Simple CPU usage calculation using /proc/stat
+	cmd := exec.Command("cat", "/proc/stat")
+	output, err := cmd.Output()
+	if err != nil {
+		log.Printf("Failed to read /proc/stat: %v", err)
+		return 0
+	}
+
+	lines := strings.Split(string(output), "\n")
+	if len(lines) == 0 {
+		return 0
+	}
+
+	fields := strings.Fields(lines[0])
+	if len(fields) < 5 {
+		return 0
+	}
+
+	// Parse CPU times
+	user, _ := strconv.ParseFloat(fields[1], 64)
+	nice, _ := strconv.ParseFloat(fields[2], 64)
+	system, _ := strconv.ParseFloat(fields[3], 64)
+	idle, _ := strconv.ParseFloat(fields[4], 64)
+
+	total := user + nice + system + idle
+	if total == 0 {
+		return 0
+	}
+
+	// Calculate usage percentage (simplified)
+	usage := ((total - idle) / total) * 100
+	return usage
+}
+
+func getMemoryUsage() (used, total uint64, percent float64) {
+	// Read memory info from /proc/meminfo
+	cmd := exec.Command("cat", "/proc/meminfo")
+	output, err := cmd.Output()
+	if err != nil {
+		log.Printf("Failed to read /proc/meminfo: %v", err)
+		return 0, 0, 0
+	}
+
+	var memTotal, memAvailable uint64
+	lines := strings.Split(string(output), "\n")
+
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+
+		switch fields[0] {
+		case "MemTotal:":
+			memTotal, _ = strconv.ParseUint(fields[1], 10, 64)
+		case "MemAvailable:":
+			memAvailable, _ = strconv.ParseUint(fields[1], 10, 64)
+		}
+	}
+
+	if memTotal == 0 {
+		return 0, 0, 0
+	}
+
+	used = memTotal - memAvailable
+	percent = float64(used) / float64(memTotal) * 100
+	return used * 1024, memTotal * 1024, percent // Convert from KB to bytes
+}
+
+func getDiskUsage() (used, total uint64, percent float64) {
+	// Get disk usage using df command
+	cmd := exec.Command("df", "/")
+	output, err := cmd.Output()
+	if err != nil {
+		log.Printf("Failed to get disk usage: %v", err)
+		return 0, 0, 0
+	}
+
+	lines := strings.Split(string(output), "\n")
+	if len(lines) < 2 {
+		return 0, 0, 0
+	}
+
+	fields := strings.Fields(lines[1])
+	if len(fields) < 4 {
+		return 0, 0, 0
+	}
+
+	// Parse sizes (in 1K blocks)
+	totalBlocks, _ := strconv.ParseUint(fields[1], 10, 64)
+	usedBlocks, _ := strconv.ParseUint(fields[2], 10, 64)
+
+	if totalBlocks == 0 {
+		return 0, 0, 0
+	}
+
+	percent = float64(usedBlocks) / float64(totalBlocks) * 100
+	return usedBlocks * 1024, totalBlocks * 1024, percent // Convert from KB to bytes
+}
+
+func getUptime() string {
+	// Get system uptime
+	cmd := exec.Command("uptime", "-p")
+	output, err := cmd.Output()
+	if err != nil {
+		// Fallback to reading /proc/uptime
+		cmd = exec.Command("cat", "/proc/uptime")
+		output, err := cmd.Output()
+		if err != nil {
+			return "Unknown"
+		}
+
+		fields := strings.Fields(string(output))
+		if len(fields) > 0 {
+			seconds, _ := strconv.ParseFloat(fields[0], 64)
+			hours := int(seconds) / 3600
+			minutes := (int(seconds) % 3600) / 60
+			return fmt.Sprintf("%d hours, %d minutes", hours, minutes)
+		}
+		return "Unknown"
+	}
+
+	return strings.TrimSpace(string(output))
+}
+
+func getSystemStatus() SystemStatus {
+	cpuUsage := getCPUUsage()
+	memUsed, memTotal, memPercent := getMemoryUsage()
+	diskUsed, diskTotal, diskPercent := getDiskUsage()
+	uptime := getUptime()
+
+	return SystemStatus{
+		CPUUsage: cpuUsage,
+		MemoryUsage: struct {
+			Used    uint64  `json:"used"`
+			Total   uint64  `json:"total"`
+			Percent float64 `json:"percent"`
+		}{
+			Used:    memUsed,
+			Total:   memTotal,
+			Percent: memPercent,
+		},
+		DiskUsage: struct {
+			Used    uint64  `json:"used"`
+			Total   uint64  `json:"total"`
+			Percent float64 `json:"percent"`
+		}{
+			Used:    diskUsed,
+			Total:   diskTotal,
+			Percent: diskPercent,
+		},
+		Uptime:    uptime,
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+}
+
+func broadcastSystemStatus() {
+	status := getSystemStatus()
+
+	clientsMutex.Lock()
+	defer clientsMutex.Unlock()
+
+	for client := range clients {
+		err := client.WriteJSON(status)
+		if err != nil {
+			log.Printf("Failed to send status to client: %v", err)
+			client.Close()
+			delete(clients, client)
+		}
+	}
+}
+
+
+func startSystemMonitoring() {
+	ticker := time.NewTicker(2 * time.Second) // Update every 2 seconds
+	defer ticker.Stop()
+
+	for range ticker.C {
+		broadcastSystemStatus()
+	}
+}
+
