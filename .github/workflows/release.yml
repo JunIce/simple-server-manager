@@ -1,0 +1,102 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Build web UI
+        run: npm run build
+        working-directory: web
+
+      - name: Upload web static
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-static
+          path: internal/webui/static
+          if-no-files-found: error
+
+  build:
+    needs: frontend
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.22"
+
+      - name: Download web static
+        uses: actions/download-artifact@v4
+        with:
+          name: webui-static
+          path: internal/webui/static
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          if [ "$GOOS" = "windows" ]; then
+            go build -o ./dist/service-manager-${{ matrix.goos }}-${{ matrix.goarch }}.exe ./cmd/server
+          else
+            go build -o ./dist/service-manager-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/server
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssm-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ssm-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/**/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
