@@ -1,0 +1,23 @@
+# ---- Go 构建产物 ----
+*.exe
+*.exe~
+*.test
+*.out
+service-manager
+/dist/
+
+# ---- 运行期数据 ----
+/data/
+*.log
+
+# ---- 前端 ----
+web/node_modules/
+web/dist/
+# 前端构建产物（由 npm run build 生成，go:embed 打入二进制）
+internal/webui/static/
+
+# ---- 编辑器/系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
